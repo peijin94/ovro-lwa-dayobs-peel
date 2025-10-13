@@ -9,6 +9,14 @@ from astropy.time import Time
 import astropy.units as u
 from casatools import table
 
+src_coord_lst = {
+    'CygA':  ['19:59:28.3', '+40.44.02'],
+    'CasA':  ['23:23:24.0', '+58.48.54'],
+    'VirA':  ['12:30:49.4', '+12.23.28'],
+    'TauA':  ['05:34:31.9', '+22.00.52'],
+    'HerA':  ['16:51:08.1', '+04.59.34'],
+    'HydA':  ['09:18:05.7', '-12.05.44']}
+
 def parse_wsclean_coordinates(ra_str, dec_str):
     """Parse WSClean coordinates to SkyCoord object."""
     # Convert DEC format DD.MM.SS to DD:MM:SS for astropy
@@ -100,12 +108,10 @@ def get_Sun_RA_DEC(time_mjd, observatory='OVRO'):
     # Get Sun position as seen from the observatory
     sun_coord = get_body('sun', time, location)
     
-    # Extract RA and DEC in degrees
-    ra_deg = sun_coord.ra.to(u.deg).value
-    dec_deg = sun_coord.dec.to(u.deg).value
+    ra_hourangle = sun_coord.ra.to(u.hourangle).to_string(unit=u.hourangle, sep=':', precision=4)
+    dec_hourangle = sun_coord.dec.to(u.hourangle).to_string(unit=u.hourangle, sep='.', precision=4)
     
-    return ra_deg, dec_deg
-
+    return ra_hourangle.strip(), dec_hourangle.strip()
 
 def mask_far_Sun_sources(sourcelis_fname, fname_out, ra_deg, dec_deg, distance_deg=8.0):
     """
