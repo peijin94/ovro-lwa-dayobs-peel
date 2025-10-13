@@ -1,5 +1,5 @@
-DIR_DATA=/fast/peijinz/day-peel/data
-DIR_DATA_SRC=/fast/peijinz/day-peel/data.tar # tar file of the testdata
+DIR_DATA=/fast/peijinz/day-peel/data1
+DIR_DATA_SRC=/fast/peijinz/day-peel/data1.tar # tar file of the testdata
 DIR_OUTPUT=/fast/peijinz/day-peel/
 
 # remove the directory

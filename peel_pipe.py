@@ -9,22 +9,49 @@ from pathlib import Path
 import shutil
 import argparse
 import wsclean_imaging
+import config
 from source_list import get_time_mjd, get_Sun_RA_DEC, mask_far_Sun_sources
 
 PIPELINE_SCRIPT_DIR = Path(__file__).parent
 EXECUTABLE_DIR = Path(__file__).parent / "exe"
 
-def run_casa_applycal(input_ms, output_ms, gaintable):
+def run_casa_applycal(input_ms, gaintable):
     """Apply CASA bandpass calibration"""
     print(f"Step : CASA applycal - {input_ms}")
     start_time = time.time()
     try:
-        subprocess.run(["python3", str(EXECUTABLE_DIR / "flagant_applybp.py"), str(input_ms), str(output_ms), str(gaintable)], check=True)
+        subprocess.run(["python3", str(EXECUTABLE_DIR / "flagant_applybp.py"), str(input_ms), str(gaintable)], check=True)
         elapsed = time.time() - start_time
         print(f"✓ CASA applycal completed ({elapsed:.1f}s)")
     except subprocess.CalledProcessError as e:
         elapsed = time.time() - start_time
         print(f"✗ CASA applycal failed after {elapsed:.1f}s: {e.stdout}")
+        sys.exit(1)
+
+def run_combine_ms(input_ms_list, output_ms):
+    """DP3 combine multiple MS files"""
+    print(f"Step : DP3 combine MS - {len(input_ms_list)} files -> {output_ms}")
+    start_time = time.time()
+    
+    output_path = Path(output_ms)
+    
+    # Create msin list string: [ms1,ms2,ms3,...]
+    msin_str = "[" + ",".join([str(Path(ms)) for ms in input_ms_list]) + "]"
+    
+    parset_content = f"""msin={msin_str}
+        msout={str(output_path)}
+        msin.datacolumn=CORRECTED_DATA
+        steps=[]
+        """
+    
+    cmd = ["DP3", *parset_content.split()]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        elapsed = time.time() - start_time
+        print(f"✓ DP3 combine completed ({elapsed:.1f}s): {output_ms}")
+    except subprocess.CalledProcessError as e:
+        elapsed = time.time() - start_time
+        print(f"✗ DP3 combine failed after {elapsed:.1f}s: {e.stdout}")
         sys.exit(1)
 
 def run_dp3_flag_avg(input_ms, output_ms, strategy_file=None):
@@ -53,7 +80,7 @@ def run_dp3_flag_avg(input_ms, output_ms, strategy_file=None):
         flag.type=aoflagger
         flag.strategy={strategy_file_path_str}
         avg.type=averager
-        avg.freqstep=4
+        avg.freqstep={config.init_avg_n_freq}
         """
 #flag.keepstatistics=false
 
@@ -89,7 +116,7 @@ def run_wsclean_imaging(input_ms, output_prefix="image", auto_pix_fov=True, **kw
         print(f"✓ WSClean imaging completed ({elapsed:.1f}s): {output_prefix}*.fits")
     except subprocess.CalledProcessError as e:
         elapsed = time.time() - start_time
-        print(f"✗ WSClean imaging failed after {elapsed:.1f}s: {e}")
+        print(f"✗ WSClean imaging failed after {elapsed:.1f}s: {e.stdout, e.stderr}")
         sys.exit(1)
 
 def run_gaincal(input_ms, solution_fname="solution.h5", cal_type="diagonalphase"):
@@ -283,160 +310,99 @@ def run_dp3_avg(input_ms, output_ms, freq_step=4):
         print(f"✗ DP3 frequency averaging failed after {elapsed:.1f}s: {e}")
         sys.exit(1)
 
-def run_calib_pipeline(raw_ms, gaintable, output_prefix="proc", plot_mid_steps=False, rm_ms_tmp=False, DEBUG=False, fch_img=True, mfs_img=False):
-    """Run complete processing pipeline"""
+def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None):
+    """Run peeling pipeline for multiple wideband MS files
+    
+    Args:
+        ms_list: List of input measurement set paths
+        bcal_list: List of corresponding bandpass calibration tables
+        output_prefix: Prefix for output files
+        output_dir: Directory for output files (default: parent of first MS)
+    """
     
     pipeline_start = time.time()
-    raw_path = Path(raw_ms)
-    data_dir = raw_path.parent
     
-    # Define intermediate file paths
-    applied_bp_ms = data_dir / f"{raw_path.stem}_applied_bp.ms"
-    flagged_avg_ms = data_dir / f"{raw_path.stem}_flagged_avg.ms"
-    solution_file = data_dir / f"{output_prefix}_solution.h5"
-    final_ms = data_dir / f"{raw_path.stem}_{output_prefix}_final.ms"
+    # Validate inputs
+    if len(ms_list) != len(bcal_list):
+        print(f"Error: Number of MS files ({len(ms_list)}) must match number of bandpass tables ({len(bcal_list)})")
+        sys.exit(1)
+    
+    for ms in ms_list:
+        if not Path(ms).exists():
+            print(f"Error: MS file not found: {ms}")
+            sys.exit(1)
+    
+    for bcal in bcal_list:
+        if not Path(bcal).exists():
+            print(f"Error: Bandpass table not found: {bcal}")
+            sys.exit(1)
+    
+    # Set output directory
+    if output_dir is None:
+        output_dir = Path(ms_list[0]).parent
+    else:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Extract timestamp from first MS filename
+    first_ms_name = Path(ms_list[0]).stem
+    timestamp = first_ms_name.split('_')[0] + '_' + first_ms_name.split('_')[1]
     
     print("="*60)
-    print("LWA Quick Processing Pipeline")
+    print("LWA Peeling Pipeline - Wideband Processing")
     print("="*60)
-    print(f"Input: {raw_ms}")
-    print(f"Gaintable: {gaintable}")
+    print(f"Input MS files: {len(ms_list)}")
+    for i, (ms, bcal) in enumerate(zip(ms_list, bcal_list)):
+        print(f"  [{i+1}] {Path(ms).name} -> {Path(bcal).name}")
+    print(f"Output directory: {output_dir}")
     print(f"Output prefix: {output_prefix}")
     print("="*60)
-
-    # Step 1: casatools applycal
-    run_casa_applycal(raw_ms, str(applied_bp_ms), gaintable)
     
-    # Step 2: DP3 flagging and averaging, assuming corrected data column exists
-    run_dp3_flag_avg(applied_bp_ms, flagged_avg_ms, strategy_file=PIPELINE_SCRIPT_DIR / "lua" / "LWA_sun_PZ.lua")
-
-    if rm_ms_tmp:
-        shutil.rmtree(raw_ms)
-
-    current_ms = flagged_avg_ms
-    # selfcal:
-    run_wsclean_imaging(current_ms, str(data_dir / f"{output_prefix}_image"), niter=800, mgain=0.9,horizon_mask=5,
-        save_source_list=False, auto_mask=False, auto_threshold=False)
-    run_gaincal(current_ms, solution_fname=str(solution_file), cal_type="diagonalphase")
-    run_applycal_dp3(current_ms,final_ms, solution_fname=str(solution_file), cal_entry_lst=["phase"])
-
-    if rm_ms_tmp:
-        shutil.rmtree(current_ms)
-
-    # Step 6: wsclean for source subtraction
-    run_wsclean_imaging(final_ms, str(data_dir / f"{output_prefix}_image_source"), niter=1500, mgain=0.9,horizon_mask=0.1 )#, multiscale=True)
+    # Step 1: Apply bandpass calibration to all MS files
+    applied_bp_ms_list = []
+    for i, (ms, bcal) in enumerate(zip(ms_list, bcal_list)):
+        run_casa_applycal(ms, bcal)
+        applied_bp_ms_list.append(str(ms))
     
-    # Step 7: mask far Sun sources
-    time_mjd = get_time_mjd(str(final_ms))
-    sun_ra, sun_dec = get_Sun_RA_DEC(time_mjd)
-    mask_far_Sun_sources( data_dir / f"{output_prefix}_image_source-sources.txt" , 
-        data_dir / f"{output_prefix}_image_source_masked-sources.txt", 
-        sun_ra, sun_dec, distance_deg=6.0)
-
-    # Step 8: DP3 subtract sources
-    subtracted_ms = data_dir / f"{output_prefix}_image_source_masked_subtracted.ms"
-    print(f"Subtracting sources from {final_ms} to {subtracted_ms}", str(data_dir / f"{output_prefix}_image_source_masked-sources.txt"))
-    run_dp3_subtract(final_ms, subtracted_ms, str(data_dir / f"{output_prefix}_image_source_masked-sources.txt"))
-
-    # step 9: phaseshift to sun
-    shifted_ms = data_dir / f"{output_prefix}_image_source_sun_shifted.ms"
-    print(f"Phaseshifting to sun from {subtracted_ms} to {shifted_ms}")
-    phaseshift_to_sun(subtracted_ms, shifted_ms)
-    if rm_ms_tmp:
-        shutil.rmtree(final_ms)
-        shutil.rmtree(subtracted_ms)
-
-    # final image
-#    run_wsclean_imaging(shifted_ms, str(data_dir / f"{output_prefix}_image_source_sun_shifted"), auto_pix_fov=False, 
-#        niter=3000, mgain=0.8, size=512, scale='1.5arcmin', save_source_list=False, weight='briggs -0.5')
-    shifted_ms_avg = data_dir / f"{output_prefix}_image_source_sun_shifted_avg.ms"
-    run_dp3_avg(shifted_ms, shifted_ms_avg, freq_step=4)
+    # Step 2: Combine MS files
+    combined_ms = output_dir / f"{timestamp}_combined.ms"
+    print(f"\nCombining {len(applied_bp_ms_list)} MS files...")
+    run_combine_ms(applied_bp_ms_list, str(combined_ms))
     
-    # make a copy
-    # shifted_ms_avg_copy = data_dir / f"{output_prefix}_image_source_sun_shifted_avg_copy.ms"
-    # shutil.copytree(shifted_ms_avg, shifted_ms_avg_copy)
-
+    # Step 3: Initial imaging
+    print(f"\nGenerating initial image...")
+    run_wsclean_imaging(combined_ms, str(output_dir / f"{output_prefix}_initial"), 
+                       niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False)
+    
     total_elapsed = time.time() - pipeline_start
-
     print("="*60)
-    print(f"Pipeline completed successfully! (Total time: {total_elapsed:.1f}s)")
+    print(f"Peeling pipeline completed! (Total time: {total_elapsed:.1f}s)")
+    print(f"Combined MS: {combined_ms}")
+    print(f"Initial image: {output_dir / f'{output_prefix}_initial'}*.fits")
     print("="*60)
-
-    default_wscleancmd = "wsclean -j 8 -mem 6 -quiet -no-dirty -no-update-model-required \
-        -horizon-mask 5deg -size 512 512 -scale 1.5arcmin -weight briggs -0.5 -minuv-l 10 \
-        -auto-threshold 3  -niter 6000 -mgain 0.9 -beam-fitting-size 2 -pol I "
-    import shlex
-
-    if fch_img:
-        time_start = time.time()
-        wscleancmd = default_wscleancmd + " -join-channels -channels-out 12 -name " + f"{output_prefix}_fch " + str(shifted_ms_avg)
-        subprocess.run(shlex.split(wscleancmd), check=True, capture_output=True, text=True)
-        total_elapsed = time.time() - time_start
-        print(f"✓ WSClean imaging completed ({total_elapsed:.1f}s): {output_prefix}_fch*.fits")
-
-    if mfs_img:
-        time_start = time.time()
-        wscleancmd = default_wscleancmd + " -name " + f"{output_prefix}_mfs " + str(shifted_ms_avg)
-        subprocess.run(shlex.split(wscleancmd), check=True, capture_output=True, text=True)
-        total_elapsed = time.time() - time_start
-        print(f"✓ WSClean imaging completed ({total_elapsed:.1f}s): {output_prefix}_mfs*.fits")
-
-    if DEBUG:
-        run_wsclean_imaging(subtracted_ms, str(data_dir / f"{output_prefix}_image_source_masked_subtracted"), niter=5000, mgain=0.9,horizon_mask=0.1)
-
-    if plot_mid_steps:
-        from script.plot_fits import plot_fits
-        plot_fits(data_dir / f"{output_prefix}_image-image.fits")
-        plot_fits(data_dir / f"{output_prefix}_image_source-image.fits")
-        plot_fits(data_dir / f"{output_prefix}_image_source_sun_shifted-image.fits")
-        if DEBUG:
-            plot_fits(data_dir / f"{output_prefix}_image_source_masked_subtracted-image.fits")
-        from plot_solar_image import plot_solar_image
-        plot_solar_image(data_dir / f"{output_prefix}_image_source_sun_shifted-image.fits")
-
-
+    
+    return str(combined_ms)
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LWA Quick Processing Pipeline: raw MS -> CASA applycal -> DP3 flag/avg -> wsclean -> gaincal -> applycal",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
+        description="LWA Peeling Pipeline: Multi-MS wideband processing",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
-    # Positional arguments
-    parser.add_argument("raw_ms", type=str, 
-                        help="Input raw measurement set path")
-    parser.add_argument("gaintable", type=str, 
-                        help="Calibration table path (bandpass calibration)")
-    parser.add_argument("output_prefix", type=str, nargs='?', default=None,
-                        help="Output file prefix (default: derived from input MS filename)")
-    
-    # Optional arguments
-    parser.add_argument("--keep-ms-tmp", action="store_true", default=False,
-                        help="Keep temporary measurement sets (default: remove them)")
-    parser.add_argument("--fch-img", action="store_true", default=False,
-                        help="Generate per-channel images")
-    parser.add_argument("--mfs-img", action="store_true", default=False,
-                        help="Generate multi-frequency synthesis image")
+    parser.add_argument("--ms-list", type=str, nargs='+', required=True,
+                        help="List of input measurement sets")
+    parser.add_argument("--bcal-list", type=str, nargs='+', required=True,
+                        help="List of bandpass calibration tables (must match MS list order)")
+    parser.add_argument("--output-prefix", type=str, default="peel",
+                        help="Output file prefix")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory (default: parent of first MS)")
     
     args = parser.parse_args()
     
-    # Validate inputs
-    if not Path(args.raw_ms).exists():
-        print(f"Error: Raw MS not found: {args.raw_ms}")
-        sys.exit(1)
-    
-    if not Path(args.gaintable).exists():
-        print(f"Error: Gaintable not found: {args.gaintable}")
-        sys.exit(1)
-    
-    # Determine output prefix
-    if args.output_prefix is None:
-        args.output_prefix = Path(args.raw_ms).stem.split('.')[0]
-    
-    # Run the pipeline
-    run_calib_pipeline( args.raw_ms,  args.gaintable,  args.output_prefix, 
-        plot_mid_steps=False,  rm_ms_tmp=not args.keep_ms_tmp,  DEBUG=False,  
-        fch_img=args.fch_img,  mfs_img=args.mfs_img)
+    # Run the peeling pipeline
+    run_peel_pipeline(args.ms_list, args.bcal_list, 
+                     output_prefix=args.output_prefix,
+                     output_dir=args.output_dir)
 
 if __name__ == "__main__":
     main()
