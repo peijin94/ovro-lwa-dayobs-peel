@@ -455,60 +455,59 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
     #                   niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False)
 
 
+    current_ms = combined_ms
     # step 4: phase to coordinate of cyg-A
-    src_name = "CygA"
-    cyg_a_ms = output_dir / f"{output_prefix}_{src_name}.ms"
-    phaseshift_to_RA_DEC(combined_ms, cyg_a_ms, src_coord_lst[src_name][0], src_coord_lst[src_name][1])
+    for src_name in ["CygA", "CasA"]:
+        src_a_ms = output_dir / f"{output_prefix}_{src_name}.ms"
+        phaseshift_to_RA_DEC(current_ms, src_a_ms, src_coord_lst[src_name][0], src_coord_lst[src_name][1])
 
-    # step 5: frequency averaging [for decorrelation]
-    cyg_a_avg_ms = output_dir / f"{output_prefix}_{src_name}_avg.ms"
-    run_dp3_avg(cyg_a_ms, cyg_a_avg_ms, freq_step=96)
+        # step 5: frequency averaging [for decorrelation]
+        src_a_avg_ms = output_dir / f"{output_prefix}_{src_name}_avg.ms"
+        run_dp3_avg(src_a_ms, src_a_avg_ms, freq_step=96)
 
-    # step 6: cal
-    skymodel_fname =  PIPELINE_SCRIPT_DIR / "skymodel" / "LOFAR-A-team.skymodel"
-    run_dp3_gaincal_Ateam_source(cyg_a_avg_ms, skymodel_fname, solution_fname=f"sol_{src_name}.h5", sources=src_name)
+        # step 6: cal
+        skymodel_fname =  PIPELINE_SCRIPT_DIR / "skymodel" / "LOFAR-A-team.skymodel"
+        run_dp3_gaincal_Ateam_source(src_a_avg_ms, skymodel_fname, solution_fname=f"sol_{src_name}.h5", sources=src_name)
 
-    # step 7: applycal
-    applycal_ms = output_dir / f"{output_prefix}_{src_name}_applycal.ms"
-    applycal_avg_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg.ms"
-    run_applycal_dp3(cyg_a_ms, applycal_ms, solution_fname=f"sol_{src_name}.h5")
-    run_applycal_dp3(cyg_a_avg_ms, applycal_avg_ms, solution_fname=f"sol_{src_name}.h5")
+        # step 7: applycal
+        applycal_ms = output_dir / f"{output_prefix}_{src_name}_applycal.ms"
+        applycal_avg_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg.ms"
+        run_applycal_dp3(src_a_ms, applycal_ms, solution_fname=f"sol_{src_name}.h5")
+        run_applycal_dp3(src_a_avg_ms, applycal_avg_ms, solution_fname=f"sol_{src_name}.h5")
 
-    # step 8: selfcal
-    run_wsclean_imaging(applycal_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
-            niter=500, mgain=0.9, horizon_mask=3, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
-            join_channels=True, channels_out=4, fit_spectral_pol=2)
-    run_gaincal(applycal_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
+        # step 8: selfcal
+        run_wsclean_imaging(applycal_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
+                niter=500, mgain=0.9, horizon_mask=3, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
+                join_channels=True, channels_out=4, fit_spectral_pol=2)
+        run_gaincal(applycal_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
 
-    applycal_avg_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg_self.ms"
-    applycal_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_self.ms"
-    run_applycal_dp3(applycal_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
-    run_applycal_dp3(applycal_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        applycal_avg_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg_self.ms"
+        applycal_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_self.ms"
+        run_applycal_dp3(applycal_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_applycal_dp3(applycal_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
 
 
-    # step 9: subtract
-    # img for subtract
-    run_wsclean_imaging(applycal_avg_self_ms, str(output_dir / f"{output_prefix}_{src_name}_avg_self"), 
-            niter=5000, mgain=0.8, horizon_mask=2, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
-            join_channels=True, channels_out=4, fit_spectral_pol=2)
+        # step 9: subtract
+        # img for subtract
+        run_wsclean_imaging(applycal_avg_self_ms, str(output_dir / f"{output_prefix}_{src_name}_avg_self"), 
+                niter=5000, mgain=0.8, horizon_mask=2, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
+                join_channels=True, channels_out=4, fit_spectral_pol=2)
 
-    subtract_ms = output_dir / f"{output_prefix}_{src_name}_subtract.ms"
+        subtract_ms = output_dir / f"{output_prefix}_{src_name}_subtract.ms"
 
-    sourcelist_fname = output_dir / f"{output_prefix}_{src_name}_avg_self-sources.txt"
-    run_dp3_subtract(applycal_self_ms, subtract_ms, sourcelist_fname)
+        sourcelist_fname = output_dir / f"{output_prefix}_{src_name}_avg_self-sources.txt"
+        run_dp3_subtract(applycal_self_ms, subtract_ms, sourcelist_fname)
 
-    run_wsclean_imaging(subtract_ms, str(output_dir / f"{output_prefix}_{src_name}_subtract_self"), 
-            niter=1000, mgain=0.8, horizon_mask=3, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
-            join_channels=True, channels_out=4, fit_spectral_pol=2)
+        # step 10 reset zenith with https://wsclean.readthedocs.io/en/latest/chgcentre.html
+        run_reset_zenith(subtract_ms)
+        run_reset_zenith(applycal_self_ms)
 
-    # step 10 reset zenith with https://wsclean.readthedocs.io/en/latest/chgcentre.html
-    run_reset_zenith(subtract_ms)
-    run_reset_zenith(applycal_self_ms)
+        # step 11: imaging
+        run_wsclean_imaging(subtract_ms, str(output_dir / f"{output_prefix}_{src_name}_subtract"), 
+                        niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False, save_source_list=False, multiscale=True, minuv_l=3)
 
-    # step 11: imaging
-    run_wsclean_imaging(subtract_ms, str(output_dir / f"{output_prefix}_{src_name}_subtract"), 
-                       niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False, save_source_list=False, multiscale=True, minuv_l=3)
 
+        current_ms = subtract_ms
     # step 6: imaging
     
     total_elapsed = time.time() - pipeline_start
