@@ -108,10 +108,10 @@ def get_Sun_RA_DEC(time_mjd, observatory='OVRO'):
     # Get Sun position as seen from the observatory
     sun_coord = get_body('sun', time, location)
     
-    ra_hourangle = sun_coord.ra.to(u.hourangle).to_string(unit=u.hourangle, sep=':', precision=4)
-    dec_hourangle = sun_coord.dec.to(u.hourangle).to_string(unit=u.hourangle, sep='.', precision=4)
+    ra_hourangle = sun_coord.ra.degree
+    dec_hourangle = sun_coord.dec.degree
     
-    return ra_hourangle.strip(), dec_hourangle.strip()
+    return str(ra_hourangle)+'deg', str(dec_hourangle)+'deg'
 
 def mask_far_Sun_sources(sourcelis_fname, fname_out, ra_deg, dec_deg, distance_deg=8.0):
     """

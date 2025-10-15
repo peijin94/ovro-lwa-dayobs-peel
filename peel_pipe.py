@@ -3,6 +3,7 @@
 Minimal pipeline script for LWA data processing
 Complete workflow: raw MS -> CASA applycal -> DP3 flag/avg -> wsclean -> gaincal -> applycal
 """
+from inspect import currentframe
 import subprocess, sys, os
 import time
 from pathlib import Path
@@ -85,7 +86,6 @@ def run_dp3_flag_avg(input_ms, output_ms, strategy_file=None):
         avg.freqstep={config.init_avg_n_freq}
         """
 #flag.keepstatistics=false
-
     cmd = ["DP3", *parset_content.split()]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -108,10 +108,8 @@ def run_wsclean_imaging(input_ms, output_prefix="image", auto_pix_fov=True, **kw
         msfile=input_path,  imagename=output_prefix,
         auto_pix_fov=auto_pix_fov, **kwargs)
     
-    # Split the command string into a list for subprocess
-    wsclean_args = wsclean_cmd_str.split()[1:]  # Remove 'wsclean' from the beginning
-    
-    cmd = ["wsclean"] + wsclean_args + [str(input_path)]
+    cmd = wsclean_cmd_str.split() + [str(input_path)]
+    print(f"Running command: {cmd}")
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         elapsed = time.time() - start_time
@@ -153,7 +151,6 @@ def run_gaincal(input_ms, solution_fname="solution.h5", cal_type="diagonalphase"
         print(f"✗ DP3 gaincal failed after {elapsed:.1f}s: {e, e.stdout, e.stderr}")
         sys.exit(1)
     
-
 def reset_solution_outliers(h5fname, N_sigma=3, reset=True):
     start_time = time.time()
     with h5py.File(h5fname, 'r') as f:
@@ -365,31 +362,43 @@ def run_reset_zenith(input_ms):
         sys.exit(1)
 
 
+from astropy.io import fits
+import numpy as np
 
-def run_wsclean_predict(target_ms, image_name):
-    """WSClean predict"""
-    print(f"Step : WSClean predict - {target_ms} -> {image_name}")
-    start_time = time.time()
-    cmd = ["wsclean", "-predict", "-name", str(image_name), str(target_ms)]
-    try:
-        subprocess.run(cmd, check=True)
-        elapsed = time.time() - start_time
-        print(f"✓ WSClean predict completed ({elapsed:.1f}s): {image_name}")
-    except subprocess.CalledProcessError as e:
-        elapsed = time.time() - start_time
-        print(f"✗ WSClean predict failed after {elapsed:.1f}s: {e}")
-        sys.exit(1)
+def make_fits_mask(pix_size, pix_r, filename='mask.fits'):
+    """
+    Create a FITS mask image for WSClean or CASA.
+
+    Parameters
+    ----------
+    pix_size : int
+        Image size in pixels (assumes square image: pix_size x pix_size)
+    pix_r : int or float
+        Radius of unmasked circular region (in pixels)
+    filename : str, optional
+        Output FITS filename (default 'mask.fits')
+
+    The mask will have:
+      1 inside the circle (unmasked / CLEAN allowed)
+      0 outside the circle (masked)
+    """
+    # Create coordinate grid
+    y, x = np.ogrid[:pix_size, :pix_size]
+    cx = cy = pix_size // 2   # center pixel
+
+    # Generate circular mask (1 inside circle, 0 outside)
+    mask = ((x - cx)**2 + (y - cy)**2) <= pix_r**2
+    mask = mask.astype(np.float32)
+    # Write to FITS
+    fits.writeto(filename, mask, overwrite=True)
+    return mask
 
 
-def run_casa_uvsub(target_ms):
-    """CASA uvsub"""
-    from casatools import uvsub
-    uvsub(vis=target_ms, reverse=False)
 
 
 def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None):
     """Run peeling pipeline for multiple wideband MS files
-    
+
     Args:
         ms_list: List of input measurement set paths
         bcal_list: List of corresponding bandpass calibration tables
@@ -397,8 +406,7 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
         output_dir: Directory for output files (default: parent of first MS)
     """
     
-    pipeline_start = time.time()
-    
+    pipeline_start = time.time()    
     # Validate inputs
     if len(ms_list) != len(bcal_list):
         print(f"Error: Number of MS files ({len(ms_list)}) must match number of bandpass tables ({len(bcal_list)})")
@@ -448,11 +456,6 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
     print(f"\nCombining {len(applied_bp_ms_list)} MS files...")
     run_combine_ms(applied_bp_ms_list, str(combined_ms))
     
-    # Step 3: Initial imaging
-    #print(f"\nGenerating initial image...")
-    #run_wsclean_imaging(combined_ms, str(output_dir / f"{output_prefix}_initial"), 
-    #                   niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False)
-
 
 
     # Direction independent selfcal before peeling:
@@ -490,28 +493,35 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
         run_applycal_dp3(applycal_avg_ms, applycal_ap_avg_ms, solution_fname=f"sol_ap_{src_name}.h5", cal_entry_lst=["phase"])
 
 
+        current_ms = applycal_ms
+        current_avg_ms = applycal_avg_ms
+
         # step 8: selfcal
-        run_wsclean_imaging(applycal_ap_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
-                niter=500, mgain=0.9, horizon_mask=3, auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
+
+        run_wsclean_imaging(current_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
+                niter=500, mgain=0.95, horizon_mask=3, auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
                 join_channels=True, channels_out=4, fit_spectral_pol=2)
-        run_gaincal(applycal_ap_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_gaincal(current_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
 
         applycal_avg_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg_self.ms"
         applycal_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_self.ms"
-        run_applycal_dp3(applycal_ap_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
-        run_applycal_dp3(applycal_ap_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_applycal_dp3(current_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_applycal_dp3(current_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
 
+        current_ms = applycal_self_ms
+        current_avg_ms = applycal_avg_self_ms
 
         # step 9: subtract
         # img for subtract
-        run_wsclean_imaging(applycal_avg_self_ms, str(output_dir / f"{output_prefix}_{src_name}_avg_self"), 
-                niter=5000, mgain=0.9, horizon_mask='1deg', auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
-                join_channels=True, channels_out=4, fit_spectral_pol=2)
+        mask_fname = output_dir / f"{output_prefix}_{src_name}_avg_self_mask.fits"
+        make_fits_mask(512, 90, filename=mask_fname)        
+        run_wsclean_imaging(current_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg_self"), 
+                niter=1500, mgain=0.8, horizon_mask='1deg', auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
+                join_channels=True, channels_out=4, fit_spectral_pol=2, fits_mask=str(mask_fname))
 
         subtract_ms = output_dir / f"{output_prefix}_{src_name}_subtract.ms"
-
         sourcelist_fname = output_dir / f"{output_prefix}_{src_name}_avg_self-sources.txt"
-        run_dp3_subtract(applycal_self_ms, subtract_ms, sourcelist_fname)
+        run_dp3_subtract(current_ms, subtract_ms, sourcelist_fname)
 
         # step 10 reset zenith with https://wsclean.readthedocs.io/en/latest/chgcentre.html
         run_reset_zenith(subtract_ms)
@@ -532,9 +542,47 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
     run_gaincal(current_ms, solution_fname=f"sol_self_DI2.h5")
     run_applycal_dp3(current_ms, combined_ms_DI_self, solution_fname=f"sol_self_DI2.h5")
     
-    # final imaging
+
     run_wsclean_imaging(combined_ms_DI_self, str(output_dir / f"{output_prefix}_combined_selfDI2"), 
-                        niter=8000, mgain=0.8, horizon_mask='3deg', auto_pix_fov=False, save_source_list=False, 
+                        niter=3000, mgain=0.8, horizon_mask='3deg', auto_pix_fov=False, save_source_list=False, 
+                        multiscale=True, minuv_l=1, weight='briggs 0', use_idg=True)
+
+    # need to peel off the Sun
+    current_ms = combined_ms_DI_self
+
+    #phase to Sun
+    sun_ms = output_dir / f"{output_prefix}_sun.ms"
+    phaseshift_to_sun(current_ms, sun_ms)
+
+    sun_avg_ms = output_dir / f"{output_prefix}_sun_avg.ms"
+    run_dp3_avg(sun_ms, sun_avg_ms, freq_step=96)
+    run_wsclean_imaging(sun_avg_ms, str(output_dir / f"{output_prefix}_sun_avg"), 
+                        niter=3000, mgain=0.9, horizon_mask='1deg', auto_pix_fov=False, size=512, 
+                        scale='1arcmin', no_negative=True, join_channels=True, 
+                        channels_out=4, fit_spectral_pol=2)
+
+    sun_self_ms = output_dir / f"{output_prefix}_sun_self.ms"
+    sun_self_avg_ms = output_dir / f"{output_prefix}_sun_self_avg.ms"
+    run_gaincal(sun_avg_ms, solution_fname=f"sol_sun.h5")
+    run_applycal_dp3(sun_avg_ms, sun_self_avg_ms, solution_fname=f"sol_sun.h5")
+    run_applycal_dp3(sun_ms, sun_self_ms, solution_fname=f"sol_sun.h5")
+
+    # subtract the Sun
+    mask_fname = output_dir / f"{output_prefix}_sun_avg_mask.fits"
+    make_fits_mask(512, 128, filename=mask_fname)
+    sourcelist_fname = output_dir / f"{output_prefix}_sun_avg-sources.txt"
+    sun_subtract_ms = output_dir / f"{output_prefix}_sun_subtract.ms"
+    run_wsclean_imaging(sun_self_avg_ms, str(output_dir / f"{output_prefix}_sun_avg"), 
+                        niter=1000, mgain=0.9, horizon_mask='3deg', auto_pix_fov=False, size=512, 
+                        scale='1arcmin', no_negative=True, join_channels=True, 
+                        channels_out=4, fit_spectral_pol=2, fits_mask=str(mask_fname), multiscale=True)
+    run_dp3_subtract(sun_self_ms, sun_subtract_ms, sourcelist_fname)
+
+    run_reset_zenith(sun_subtract_ms)
+
+    # final imaging
+    run_wsclean_imaging(sun_subtract_ms, str(output_dir / f"{output_prefix}_combined_sun_DI"), 
+                        niter=8000, mgain=0.7, horizon_mask='3deg', auto_pix_fov=False, save_source_list=False, 
                         multiscale=True, minuv_l=1, weight='briggs 0', use_idg=True)
 
     total_elapsed = time.time() - pipeline_start
