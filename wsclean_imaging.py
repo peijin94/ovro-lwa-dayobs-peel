@@ -87,7 +87,7 @@ def make_wsclean_cmd(msfile, imagename, size:int =4096, scale='2arcmin', fast_vi
         'minuv_l':'10',             # minimum uv distance in lambda
         'intervals_out':'1',        # number of output images
         'no_reorder':'',            # don't reorder the channels
-        'beam_fitting_size':'2',    # beam fitting size
+        'beam_fitting_size':'1.5',    # beam fitting size
         'horizon_mask':"2deg",      # horizon mask distance (to mask horizon direction RFI)
         'quiet':'',                 # stop printing to stdout, save time
         'save_source_list':'',      # save source list

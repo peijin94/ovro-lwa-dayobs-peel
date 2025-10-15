@@ -212,7 +212,7 @@ def run_applycal_dp3(input_ms,  output_ms, solution_fname="solution.h5", cal_ent
         sys.exit(1)
     
 
-def run_dp3_gaincal_Ateam_source(input_ms, skymodel_fname, solution_fname="solution.h5", sources="CygA"):
+def run_dp3_gaincal_Ateam_source(input_ms, skymodel_fname, solution_fname="solution.h5", sources="CygA", cal_type="diagonalphase"):
     """DP3 predict"""
     print(f"Step : DP3 predict - {input_ms} with {skymodel_fname} and {sources}")
     start_time = time.time()
@@ -228,7 +228,7 @@ def run_dp3_gaincal_Ateam_source(input_ms, skymodel_fname, solution_fname="solut
         cal0.type=gaincal
         cal0.elementmodel=lwa
         cal0.solint=0
-        cal0.caltype=diagonalphase
+        cal0.caltype={cal_type}
         cal0.uvlambdamin=30
         cal0.maxiter=500
         cal0.tolerance=1e-5
@@ -251,7 +251,7 @@ def run_dp3_gaincal_Ateam_source(input_ms, skymodel_fname, solution_fname="solut
         print(f"✗ DP3 pred-gaincal failed after {elapsed:.1f}s: {e, e.stdout, e.stderr}")
         sys.exit(1)
 
-def run_dp3_subtract(input_ms, output_ms, skymodel_fname, sources=[]):
+def run_dp3_subtract(input_ms, output_ms, skymodel_fname):
     """DP3 subtract"""
     print(f"Step : DP3 subtract - {input_ms} -> {output_ms}")
     start_time = time.time()
@@ -268,7 +268,6 @@ def run_dp3_subtract(input_ms, output_ms, skymodel_fname, sources=[]):
         predict.elementmodel=lwa
         predict.type=predict
         predict.sourcedb={str(source_path)}
-        predict.sources={','.join(sources)}
         predict.operation=subtract
         """
         
@@ -455,7 +454,17 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
     #                   niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False)
 
 
+
+    # Direction independent selfcal before peeling:
     current_ms = combined_ms
+
+    combined_ms_DI = output_dir / f"{output_prefix}_combined_selfDI.ms"
+    run_wsclean_imaging(current_ms, str(combined_ms_DI), niter=1500, mgain=0.9, horizon_mask=3, 
+        auto_pix_fov=True, no_negative=True, join_channels=True, channels_out=4, fit_spectral_pol=2, auto_mask=False, auto_threshold=False)
+    run_gaincal(current_ms, solution_fname=f"sol_self_DI.h5")
+    run_applycal_dp3(current_ms, combined_ms_DI, solution_fname=f"sol_self_DI.h5")
+
+    current_ms = combined_ms_DI
     # step 4: phase to coordinate of cyg-A
     for src_name in ["CygA", "CasA"]:
         src_a_ms = output_dir / f"{output_prefix}_{src_name}.ms"
@@ -467,30 +476,36 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
 
         # step 6: cal
         skymodel_fname =  PIPELINE_SCRIPT_DIR / "skymodel" / "LOFAR-A-team.skymodel"
-        run_dp3_gaincal_Ateam_source(src_a_avg_ms, skymodel_fname, solution_fname=f"sol_{src_name}.h5", sources=src_name)
-
-        # step 7: applycal
+        run_dp3_gaincal_Ateam_source(src_a_avg_ms, skymodel_fname, solution_fname=f"sol_{src_name}.h5", sources=src_name, cal_type="diagonalphase")
         applycal_ms = output_dir / f"{output_prefix}_{src_name}_applycal.ms"
         applycal_avg_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg.ms"
-        run_applycal_dp3(src_a_ms, applycal_ms, solution_fname=f"sol_{src_name}.h5")
-        run_applycal_dp3(src_a_avg_ms, applycal_avg_ms, solution_fname=f"sol_{src_name}.h5")
+        run_applycal_dp3(src_a_ms, applycal_ms, solution_fname=f"sol_{src_name}.h5", cal_entry_lst=["phase"])
+        run_applycal_dp3(src_a_avg_ms, applycal_avg_ms, solution_fname=f"sol_{src_name}.h5", cal_entry_lst=["phase"])
+
+
+        run_dp3_gaincal_Ateam_source(applycal_avg_ms, skymodel_fname, solution_fname=f"sol_ap_{src_name}.h5", sources=src_name, cal_type="diagonalphase")
+        applycal_ap_ms = output_dir / f"{output_prefix}_{src_name}_applycal_ap.ms"
+        applycal_ap_avg_ms = output_dir / f"{output_prefix}_{src_name}_applycal_ap_avg.ms"
+        run_applycal_dp3(applycal_ms, applycal_ap_ms, solution_fname=f"sol_ap_{src_name}.h5", cal_entry_lst=["phase"])
+        run_applycal_dp3(applycal_avg_ms, applycal_ap_avg_ms, solution_fname=f"sol_ap_{src_name}.h5", cal_entry_lst=["phase"])
+
 
         # step 8: selfcal
-        run_wsclean_imaging(applycal_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
-                niter=500, mgain=0.9, horizon_mask=3, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
+        run_wsclean_imaging(applycal_ap_avg_ms, str(output_dir / f"{output_prefix}_{src_name}_avg"), 
+                niter=500, mgain=0.9, horizon_mask=3, auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
                 join_channels=True, channels_out=4, fit_spectral_pol=2)
-        run_gaincal(applycal_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_gaincal(applycal_ap_avg_ms, solution_fname=f"sol_self_{src_name}.h5")
 
         applycal_avg_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_avg_self.ms"
         applycal_self_ms = output_dir / f"{output_prefix}_{src_name}_applycal_self.ms"
-        run_applycal_dp3(applycal_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
-        run_applycal_dp3(applycal_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_applycal_dp3(applycal_ap_avg_ms, applycal_avg_self_ms, solution_fname=f"sol_self_{src_name}.h5")
+        run_applycal_dp3(applycal_ap_ms, applycal_self_ms, solution_fname=f"sol_self_{src_name}.h5")
 
 
         # step 9: subtract
         # img for subtract
         run_wsclean_imaging(applycal_avg_self_ms, str(output_dir / f"{output_prefix}_{src_name}_avg_self"), 
-                niter=5000, mgain=0.8, horizon_mask=2, auto_pix_fov=False, size=128, scale='1arcmin', save_source_list=True, no_negative=True,
+                niter=5000, mgain=0.9, horizon_mask='1deg', auto_pix_fov=False, size=512, scale='1arcmin', save_source_list=True, no_negative=True,
                 join_channels=True, channels_out=4, fit_spectral_pol=2)
 
         subtract_ms = output_dir / f"{output_prefix}_{src_name}_subtract.ms"
@@ -500,16 +515,28 @@ def run_peel_pipeline(ms_list, bcal_list, output_prefix="peel", output_dir=None)
 
         # step 10 reset zenith with https://wsclean.readthedocs.io/en/latest/chgcentre.html
         run_reset_zenith(subtract_ms)
-        run_reset_zenith(applycal_self_ms)
 
-        # step 11: imaging
-        run_wsclean_imaging(subtract_ms, str(output_dir / f"{output_prefix}_{src_name}_subtract"), 
-                        niter=8000, mgain=0.8, horizon_mask=3, auto_pix_fov=False, save_source_list=False, multiscale=True, minuv_l=3)
+        # step 11: imaging (just for checking middle step peeling, OK to skip)
+        #run_wsclean_imaging(subtract_ms, str(output_dir / f"{output_prefix}_{src_name}_subtract"), 
+        #                niter=8000, mgain=0.8, horizon_mask='3deg', auto_pix_fov=False, save_source_list=False, multiscale=True, minuv_l=3)
 
 
         current_ms = subtract_ms
     # step 6: imaging
     
+    # DI selfcal again
+    current_ms = subtract_ms
+    combined_ms_DI_self = output_dir / f"{output_prefix}_combined_selfDI2.ms"
+    run_wsclean_imaging(current_ms, str(combined_ms_DI_self), 
+                        niter=1500, mgain=0.9, horizon_mask=3, auto_pix_fov=True, no_negative=True, join_channels=True, channels_out=4, fit_spectral_pol=2, auto_mask=False, auto_threshold=False)
+    run_gaincal(current_ms, solution_fname=f"sol_self_DI2.h5")
+    run_applycal_dp3(current_ms, combined_ms_DI_self, solution_fname=f"sol_self_DI2.h5")
+    
+    # final imaging
+    run_wsclean_imaging(combined_ms_DI_self, str(output_dir / f"{output_prefix}_combined_selfDI2"), 
+                        niter=8000, mgain=0.8, horizon_mask='3deg', auto_pix_fov=False, save_source_list=False, 
+                        multiscale=True, minuv_l=1, weight='briggs 0', use_idg=True)
+
     total_elapsed = time.time() - pipeline_start
     print("="*60)
     print(f"Peeling pipeline completed! (Total time: {total_elapsed:.1f}s)")
